@@ -1,4 +1,4 @@
-# app_seguimiento_contratos_mejorado_v3.py
+# app_seguimiento_contratos_mejorado_v5.py
 # Streamlit app: seguimiento de contratos - CRUD (SQLite) + alertas (semáforo)
 # Requisitos: pip install streamlit pandas openpyxl python-dateutil plotly
 
@@ -62,6 +62,7 @@ def safe_parse_date(s):
     if s is None or str(s).strip() == "":
         return None
     try:
+        # Parsear la fecha y devolver solo la parte de la fecha
         return parser.parse(str(s)).date()
     except Exception:
         return None
@@ -83,6 +84,33 @@ def compute_alert_color(row):
         pass
     return '⚪'
 
+def format_currency(value):
+    try:
+        if pd.isna(value) or value == "":
+            return ""
+        # Convertir a flotante, luego a entero, y formatear con signo de pesos y separador de miles
+        return f"$ {int(float(value)):,d}"
+    except (ValueError, TypeError):
+        return str(value)
+
+def format_numeric_no_decimals(value):
+    try:
+        if pd.isna(value) or value == "":
+            return ""
+        # Convertir a flotante y luego a entero para eliminar decimales
+        return int(float(value))
+    except (ValueError, TypeError):
+        return value
+
+def format_date_only(value):
+    try:
+        if pd.isna(value) or value == "":
+            return ""
+        # Convertir a formato de fecha y luego a cadena sin la hora
+        return pd.to_datetime(value).strftime('%Y-%m-%d')
+    except (ValueError, TypeError):
+        return value
+        
 # --- DB helpers ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -295,6 +323,10 @@ elif st.session_state.current_page == "Alertas de Vencimiento":
             )
             df_alerts['Semaforo'] = df_alerts.apply(compute_alert_color, axis=1)
             cols_show = ['Semaforo', 'Días Restantes', 'Fecha Final Contrato', 'Código Interno / Proceso', 'Nombre del Proceso / Objeto del Contrato', 'Proveedor / Contratista', 'Supervisor']
+            
+            # Formatear la columna de fecha
+            df_alerts['Fecha Final Contrato'] = df_alerts['Fecha Final Contrato'].apply(format_date_only)
+            
             st.dataframe(df_alerts[cols_show].sort_values(by='Días Restantes', ascending=True), use_container_width=True)
         else:
             st.success("¡No hay contratos en estado de alerta (rojo o amarillo)!")
@@ -303,15 +335,18 @@ elif st.session_state.current_page == "Alertas de Vencimiento":
 elif st.session_state.current_page == "Ver Contratos":
     st.header("🔍 Ver Contratos")
     st.markdown("---")
+    filtered_df = df_all.copy()
+    
     with st.expander("Filtros avanzados 🔎"):
         filter_cols = st.multiselect("Selecciona las columnas para filtrar", options=COLUMNS, key="filter_cols_select")
-        filtered_df = df_all.copy()
         if filter_cols:
             for col in filter_cols:
                 if "Fecha" in col:
                     try:
-                        filtered_df[f'{col}_date'] = pd.to_datetime(filtered_df[col], errors='coerce').dt.date
-                        min_date, max_date = filtered_df[f'{col}_date'].min(), filtered_df[f'{col}_date'].max()
+                        # Se usa .copy() para evitar SettingWithCopyWarning
+                        temp_df = filtered_df.copy()
+                        temp_df[f'{col}_date'] = pd.to_datetime(temp_df[col], errors='coerce').dt.date
+                        min_date, max_date = temp_df[f'{col}_date'].min(), temp_df[f'{col}_date'].max()
                         if pd.notna(min_date) and pd.notna(max_date):
                             start_date, end_date = st.date_input(
                                 f"Rango de Fechas para **{col}**",
@@ -320,23 +355,25 @@ elif st.session_state.current_page == "Ver Contratos":
                                 max_value=max_date,
                                 key=f'date_filter_{col}'
                             )
-                            filtered_df = filtered_df[(filtered_df[f'{col}_date'] >= start_date) & (filtered_df[f'{col}_date'] <= end_date)]
-                    except:
-                        st.warning(f"No se pudo aplicar el filtro de fecha para '{col}'.")
+                            filtered_df = filtered_df[pd.to_datetime(filtered_df[col], errors='coerce').dt.date.between(start_date, end_date)]
+                    except Exception as e:
+                        st.warning(f"No se pudo aplicar el filtro de fecha para '{col}'. Error: {e}")
                 elif "Valor" in col or "Saldo" in col or "Adición" in col:
                     try:
-                        filtered_df[f'{col}_numeric'] = pd.to_numeric(filtered_df[col], errors='coerce')
-                        min_val, max_val = filtered_df[f'{col}_numeric'].min(), filtered_df[f'{col}_numeric'].max()
-                        min_input, max_input = st.slider(
-                            f"Rango de Valores para **{col}**",
-                            min_value=float(min_val),
-                            max_value=float(max_val),
-                            value=(float(min_val), float(max_val)),
-                            key=f'numeric_filter_{col}'
-                        )
-                        filtered_df = filtered_df[(filtered_df[f'{col}_numeric'] >= min_input) & (filtered_df[f'{col}_numeric'] <= max_input)]
-                    except:
-                        st.warning(f"No se pudo aplicar el filtro numérico para '{col}'.")
+                        temp_df = filtered_df.copy()
+                        temp_df[f'{col}_numeric'] = pd.to_numeric(temp_df[col], errors='coerce')
+                        min_val, max_val = temp_df[f'{col}_numeric'].min(), temp_df[f'{col}_numeric'].max()
+                        if pd.notna(min_val) and pd.notna(max_val):
+                            min_input, max_input = st.slider(
+                                f"Rango de Valores para **{col}**",
+                                min_value=float(min_val),
+                                max_value=float(max_val),
+                                value=(float(min_val), float(max_val)),
+                                key=f'numeric_filter_{col}'
+                            )
+                            filtered_df = filtered_df[pd.to_numeric(filtered_df[col], errors='coerce').between(min_input, max_input)]
+                    except Exception as e:
+                        st.warning(f"No se pudo aplicar el filtro numérico para '{col}'. Error: {e}")
                 elif col in ["Estado Actual del Proceso", "Tipo de Contrato", "Fuente de financiamiento", "Modalidad de selección", "Proveedor / Contratista", "Supervisor", "Código Interno / Proceso", "Nombre del Proceso / Objeto del Contrato"]:
                     options = sorted(list(filtered_df[col].dropna().unique()))
                     selected_options = st.multiselect(
@@ -349,16 +386,35 @@ elif st.session_state.current_page == "Ver Contratos":
                 else:
                     search_term = st.text_input(f"Busca en **{col}**", "", key=f'text_filter_{col}')
                     if search_term:
-                        filtered_df = filtered_df[filtered_df[col].str.contains(search_term, case=False, na=False)]
+                        filtered_df = filtered_df[filtered_df[col].astype(str).str.contains(search_term, case=False, na=False)]
 
     st.markdown("---")
     st.subheader(f"Resultados ({len(filtered_df)} contratos)")
+    
     if filtered_df.empty:
         st.info("No se encontraron contratos que coincidan con los filtros.")
     else:
-        filtered_df['Semaforo'] = filtered_df.apply(compute_alert_color, axis=1)
-        cols_show = [c for c in COLUMNS if c in filtered_df.columns]
-        st.dataframe(filtered_df[cols_show].sort_values(by='Código Interno / Proceso', ascending=True), use_container_width=True)
+        # Preparar el DataFrame para la visualización
+        df_display = filtered_df.copy()
+        
+        # Aplicar formato a las columnas numéricas y de fecha
+        for col in ["Valor estimado en la vigencia actual", "Adición CDP", "Valor disminuido CDP", "Valor total CDP", "Valor contratado", "Saldo disponible CDP", "Adición en la ejecución", "Valor total contratado"]:
+            df_display[col] = df_display[col].apply(format_currency)
+        
+        for col in ["Fecha de estructuración", "Fecha de envio a Contratos", "Fecha de respuesta de contratos", "Fecha acta de inicio / Fecha Inicio", "Fecha Final Contrato", "Fecha final de licencia/servicio"]:
+            df_display[col] = df_display[col].apply(format_date_only)
+
+        # Formatear la columna "Número del contrato" a entero
+        df_display["Número del contrato"] = df_display["Número del contrato"].apply(format_numeric_no_decimals)
+
+        # Formatear las columnas "Mes de inicio" a entero
+        df_display["Mes de inicio1"] = df_display["Mes de inicio1"].apply(format_numeric_no_decimals)
+        df_display["Mes de inicio2"] = df_display["Mes de inicio2"].apply(format_numeric_no_decimals)
+
+        # Se eliminó la línea df_display['Semaforo'] = df_display.apply(compute_alert_color, axis=1)
+        
+        cols_show = [c for c in COLUMNS if c in df_display.columns]
+        st.dataframe(df_display[cols_show].sort_values(by='Código Interno / Proceso', ascending=True), use_container_width=True)
 
 # --- Agregar registro ---
 elif st.session_state.current_page == "Agregar registro":
@@ -532,9 +588,22 @@ elif st.session_state.current_page == "Exportar Excel":
         st.info("No hay datos para exportar.")
     else:
         output = io.BytesIO()
-        df_export = df_all.drop(columns=['id'], errors='ignore')
+        df_export = df_all.drop(columns=['id'], errors='ignore').copy()
+
+        # Aplicar formato a las columnas de fecha y valores antes de exportar
+        for col in ["Fecha de estructuración", "Fecha de envio a Contratos", "Fecha de respuesta de contratos", "Fecha acta de inicio / Fecha Inicio", "Fecha Final Contrato", "Fecha final de licencia/servicio"]:
+            df_export[col] = df_export[col].apply(lambda x: safe_parse_date(x).isoformat() if safe_parse_date(x) else "")
+        
+        for col in ["Número del contrato", "Mes de inicio1", "Mes de inicio2", "Valor estimado en la vigencia actual", "Adición CDP", "Valor disminuido CDP", "Valor total CDP", "Valor contratado", "Saldo disponible CDP", "Adición en la ejecución", "Valor total contratado"]:
+            try:
+                # Convertir a numérico para asegurar el tipo de dato correcto en Excel
+                df_export[col] = pd.to_numeric(df_export[col], errors='coerce').fillna("")
+            except Exception:
+                pass
+        
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_export.to_excel(writer, index=False, sheet_name="Contratos")
+        
         st.download_button(
             "⬇️ Descargar Excel",
             data=output.getvalue(),
